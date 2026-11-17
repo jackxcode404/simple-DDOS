@@ -1,148 +1,321 @@
-
 import csv
+import json
+import os
+import re
 import time
 import socket
 import ipaddress
 import threading
+
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import matplotlib.pyplot as plt
 
 
-# ==================================================
+# =====================================================
 # KONFIGURASI
-# ==================================================
+# =====================================================
 
 MAX_DURATION = 5000
-MAX_RPS = 20
-MAX_WORKERS = 20
+MAX_RPS = 50
+MAX_WORKERS = 50
 REQUEST_TIMEOUT = 5
 
-# Tambahkan hostname/IP server milikmu atau yang
-# sudah mendapatkan izin pengujian.
-# Contoh: "contoh-domain.com"
+HOSTS_FILE = "authorized_hosts.json"
+REPORT_DIR = "reports"
+
 AUTHORIZED_HOSTS = {
     "localhost",
     "127.0.0.1",
-    "::1",
-    "stieieu.ecampuz.com",
-    # "contoh-domain.com",
+    "::1"
 }
 
-LOG_DIR = "logs"
-REPORT_DIR = "reports"
-
 log_lock = threading.Lock()
-results = []
 
 
-# ==================================================
-# LOG TERMINAL
-# ==================================================
+# =====================================================
+# SISTEM LOG
+# =====================================================
 
 def log(message, level="INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with log_lock:
-        print(f"[{timestamp}] [{level}] {message}", flush=True)
+        print(
+            f"[{timestamp}] [{level}] {message}",
+            flush=True
+        )
 
 
-# ==================================================
+# =====================================================
+# AUTHORIZED HOSTS
+# =====================================================
+
+def save_authorized_hosts():
+    with open(HOSTS_FILE, "w", encoding="utf-8") as file:
+        json.dump(
+            sorted(AUTHORIZED_HOSTS),
+            file,
+            indent=4
+        )
+
+
+def load_authorized_hosts():
+    global AUTHORIZED_HOSTS
+
+    try:
+        with open(HOSTS_FILE, "r", encoding="utf-8") as file:
+            hosts = json.load(file)
+
+        if not isinstance(hosts, list):
+            raise ValueError("Format file host tidak valid.")
+
+        for host in hosts:
+            if isinstance(host, str) and is_valid_host(host):
+                AUTHORIZED_HOSTS.add(host.lower())
+
+    except FileNotFoundError:
+        save_authorized_hosts()
+
+    except (json.JSONDecodeError, OSError, ValueError) as error:
+        log(f"Gagal membaca daftar host: {error}", "WARNING")
+
+
+def is_valid_host(host):
+    if not isinstance(host, str) or not host:
+        return False
+
+    host = host.strip().lower()
+
+    if len(host) > 253:
+        return False
+
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+
+    pattern = (
+        r"(?=.{1,253}$)"
+        r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)"
+        r"(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*"
+    )
+
+    return bool(re.fullmatch(pattern, host))
+
+
+def add_authorized_host():
+    print("\n--- TAMBAH DOMAIN/IP ---")
+
+    host = input("Masukkan domain/IP: ").strip().lower()
+
+    if not is_valid_host(host):
+        log("Format domain/IP tidak valid.", "ERROR")
+        return
+
+    if host in AUTHORIZED_HOSTS:
+        log("Host sudah terdaftar.", "WARNING")
+        return
+
+    print("\nPastikan kamu pemilik target atau sudah")
+    print("mendapatkan izin pengujian dari pemiliknya.")
+
+    confirmation = input("Ketik Y untuk menyimpan: ").strip()
+
+    if confirmation != "Y":
+        log("Penambahan dibatalkan.", "WARNING")
+        return
+
+    AUTHORIZED_HOSTS.add(host)
+    save_authorized_hosts()
+
+    log(f"Host {host} berhasil ditambahkan.", "SUCCESS")
+
+
+def view_authorized_hosts():
+    print("\n--- DAFTAR DOMAIN/IP ---")
+
+    for index, host in enumerate(
+        sorted(AUTHORIZED_HOSTS), start=1
+    ):
+        print(f"{index}. {host}")
+
+    print("-------------------------------")
+
+
+def remove_authorized_host():
+    view_authorized_hosts()
+
+    host = input("\nMasukkan DOMAIN?IP yang ingin dihapus: ")
+    host = host.strip().lower()
+
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        log("Host lokal bawaan tidak dapat dihapus.", "WARNING")
+        return
+
+    if host not in AUTHORIZED_HOSTS:
+        log("Host tidak ditemukan.", "WARNING")
+        return
+
+    confirmation = input("Ketik DELETE untuk menghapus: ")
+
+    if confirmation != "DELETE":
+        log("Penghapusan dibatalkan.", "WARNING")
+        return
+
+    AUTHORIZED_HOSTS.remove(host)
+    save_authorized_hosts()
+
+    log(f"Host {host} berhasil dihapus.", "SUCCESS")
+
+
+def manage_authorized_hosts():
+    while True:
+        print("\n================================")
+        print("      DOMAIN/IP")
+        print("================================")
+        print("1. Tambah DOMAIN/IP")
+        print("2. Lihat daftar DOMAIN/IP")
+        print("3. Hapus DOMAIN/IP")
+        print("4. Kembali")
+        print("================================")
+
+        choice = input("Pilih menu: ").strip()
+
+        if choice == "1":
+            add_authorized_host()
+
+        elif choice == "2":
+            view_authorized_hosts()
+
+        elif choice == "3":
+            remove_authorized_host()
+
+        elif choice == "4":
+            break
+
+        else:
+            log("Pilihan tidak valid.", "WARNING")
+
+
+# =====================================================
 # VALIDASI TARGET
-# ==================================================
+# =====================================================
 
 def validate_url(url):
     parsed = urlparse(url)
 
     if parsed.scheme not in ("http", "https"):
-        raise ValueError("URL harus menggunakan http:// atau https://")
+        raise ValueError("Gunakan URL http:// atau https://")
 
     if not parsed.hostname:
-        raise ValueError("Hostname URL tidak valid.")
+        raise ValueError("Hostname tidak valid.")
 
     if parsed.username or parsed.password:
-        raise ValueError("URL tidak boleh berisi username/password.")
+        raise ValueError("URL tidak boleh berisi kredensial.")
 
     hostname = parsed.hostname.lower()
 
     if hostname not in AUTHORIZED_HOSTS:
         raise ValueError(
-            f"Target '{hostname}' belum ada di AUTHORIZED_HOSTS."
+            f"Host {hostname} belum terdaftar."
         )
 
     try:
         addresses = socket.getaddrinfo(
-            hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+            hostname,
+            parsed.port or (
+                443 if parsed.scheme == "https" else 80
+            )
         )
     except socket.gaierror:
         raise ValueError("Hostname tidak dapat ditemukan.")
 
-    # Pastikan alamat IP hasil DNS tidak berubah menjadi
-    # alamat lokal/private yang tidak diizinkan atau sebaliknya.
     for address in addresses:
         ip = ipaddress.ip_address(address[4][0])
 
-        if hostname not in ("localhost", "127.0.0.1", "::1"):
-            if ip.is_loopback or ip.is_multicast or ip.is_unspecified:
-                raise ValueError("Alamat IP target tidak diizinkan.")
+        if hostname not in {"localhost", "127.0.0.1", "::1"}:
+            if (
+                ip.is_loopback
+                or ip.is_multicast
+                or ip.is_unspecified
+            ):
+                raise ValueError(
+                    "Alamat IP hasil DNS tidak diizinkan."
+                )
 
     return url
 
 
-# ==================================================
-# KIRIM REQUEST
-# ==================================================
+# =====================================================
+# HTTP REQUEST
+# =====================================================
 
 def send_request(url, request_id):
     start = time.perf_counter()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    timestamp = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
     try:
         response = requests.get(
             url,
             timeout=REQUEST_TIMEOUT,
             allow_redirects=False,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"}
+            headers={
+                "User-Agent": "Authorized-Load-Test/1.0"
+            }
         )
 
-        latency = round((time.perf_counter() - start) * 1000, 2)
+        latency = round(
+            (time.perf_counter() - start) * 1000, 2
+        )
 
-        result = {
+        status = response.status_code
+        response.close()
+
+        if status == 200:
+            log(
+                f"Request #{request_id} berhasil | "
+                f"HTTP {status} | {latency} ms",
+                "SUCCESS"
+            )
+
+        elif status == 429:
+            log(
+                f"Request #{request_id} dibatasi server.",
+                "WARNING"
+            )
+
+        else:
+            log(
+                f"Request #{request_id} | "
+                f"HTTP {status} | {latency} ms",
+                "WARNING"
+            )
+
+        return {
             "id": request_id,
             "time": timestamp,
-            "status": response.status_code,
+            "status": status,
             "latency_ms": latency,
             "error": ""
         }
 
-        if response.status_code == 200:
-            log(
-                f"Request #{request_id} berhasil | "
-                f"HTTP {response.status_code} | {latency} ms",
-                "SUCCESS"
-            )
-        elif response.status_code == 429:
-            log(
-                f"Request #{request_id} dibatasi server (HTTP 429)",
-                "WARNING"
-            )
-        else:
-            log(
-                f"Request #{request_id} mendapat HTTP "
-                f"{response.status_code} | {latency} ms",
-                "WARNING"
-            )
-
-        response.close()
-        return result
-
     except requests.RequestException as error:
-        latency = round((time.perf_counter() - start) * 1000, 2)
+        latency = round(
+            (time.perf_counter() - start) * 1000, 2
+        )
 
-        log(f"Request #{request_id} gagal: {error}", "ERROR")
+        log(
+            f"Request #{request_id} gagal: {error}",
+            "ERROR"
+        )
 
         return {
             "id": request_id,
@@ -153,9 +326,9 @@ def send_request(url, request_id):
         }
 
 
-# ==================================================
-# ANALISIS HASIL
-# ==================================================
+# =====================================================
+# ANALISIS
+# =====================================================
 
 def analyze(data):
     successful = [
@@ -166,28 +339,28 @@ def analyze(data):
 
     failed = len(data) - len(successful)
 
-    latencies = [item["latency_ms"] for item in data]
+    latencies = [
+        item["latency_ms"] for item in data
+    ]
 
     average = (
         round(sum(latencies) / len(latencies), 2)
         if latencies else 0
     )
 
-    log("========== HASIL PENGUJIAN ==========")
-    log(f"Total request : {len(data)}")
-    log(f"Berhasil      : {len(successful)}")
-    log(f"Gagal/lainnya : {failed}")
-    log(f"Rata-rata     : {average} ms")
-    log("=====================================")
+    print("\n========== HASIL PENGUJIAN ==========")
+    print(f"Total request : {len(data)}")
+    print(f"Berhasil      : {len(successful)}")
+    print(f"Gagal/lainnya : {failed}")
+    print(f"Rata-rata     : {average} ms")
+    print("=====================================")
 
 
-# ==================================================
+# =====================================================
 # SIMPAN LAPORAN CSV
-# ==================================================
+# =====================================================
 
 def save_report(data):
-    import os
-
     os.makedirs(REPORT_DIR, exist_ok=True)
 
     filename = (
@@ -195,41 +368,49 @@ def save_report(data):
         f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
 
-    with open(filename, "w", newline="", encoding="utf-8") as file:
+    with open(
+        filename, "w", newline="", encoding="utf-8"
+    ) as file:
+
         writer = csv.DictWriter(
             file,
             fieldnames=[
-                "id", "time", "status", "latency_ms", "error"
+                "id",
+                "time",
+                "status",
+                "latency_ms",
+                "error"
             ]
         )
 
         writer.writeheader()
         writer.writerows(data)
 
-    log(f"Laporan CSV disimpan: {filename}", "SUCCESS")
+    log(f"Laporan disimpan: {filename}", "SUCCESS")
 
 
-# ==================================================
-# SIMPAN GRAFIK
-# ==================================================
+# =====================================================
+# GRAFIK LATENSI
+# =====================================================
 
 def save_graph(data):
-    import os
+    if not data:
+        log("Tidak ada data grafik.", "WARNING")
+        return
 
     os.makedirs(REPORT_DIR, exist_ok=True)
 
-    if not data:
-        log("Tidak ada data untuk dibuat grafik.", "WARNING")
-        return
-
     ids = [item["id"] for item in data]
-    latencies = [item["latency_ms"] for item in data]
+    latencies = [
+        item["latency_ms"] for item in data
+    ]
 
     plt.figure(figsize=(10, 5))
     plt.plot(ids, latencies, marker="o")
-    plt.title("Grafik Latensi Pengujian HTTP")
-    plt.xlabel("Nomor Request")
-    plt.ylabel("Latensi (ms)")
+
+    plt.title("HTTP Load Test - Latency")
+    plt.xlabel("Request")
+    plt.ylabel("Latency (ms)")
     plt.grid(True)
 
     filename = (
@@ -244,15 +425,14 @@ def save_graph(data):
     log(f"Grafik disimpan: {filename}", "SUCCESS")
 
 
-# ==================================================
-# SIMULASI LOAD TEST TERBATAS
-# ==================================================
+# =====================================================
+# LOAD TEST TERBATAS
+# =====================================================
 
 def run_simulation(url, duration, rps):
-    global results
     results = []
 
-    log("Pengujian dimulai.", "INFO")
+    log("Pengujian dimulai.")
     log(f"Target   : {url}")
     log(f"Durasi   : {duration} detik")
     log(f"Kecepatan: {rps} request/detik")
@@ -263,26 +443,33 @@ def run_simulation(url, duration, rps):
     request_id = 0
     pending = []
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
 
         while time.monotonic() - start_time < duration:
+
             now = time.monotonic()
 
             if now < next_request:
-                time.sleep(min(next_request - now, 0.05))
+                time.sleep(
+                    min(next_request - now, 0.05)
+                )
                 continue
 
             request_id += 1
+
             log(f"Mengirim request #{request_id}")
 
             future = executor.submit(
-                send_request, url, request_id
+                send_request,
+                url,
+                request_id
             )
-            pending.append(future)
 
+            pending.append(future)
             next_request += interval
 
-            # Ambil hasil yang sudah selesai tanpa menunggu semuanya.
             unfinished = []
 
             for task in pending:
@@ -290,19 +477,25 @@ def run_simulation(url, duration, rps):
                     try:
                         results.append(task.result())
                     except Exception as error:
-                        log(f"Kesalahan worker: {error}", "ERROR")
+                        log(
+                            f"Worker error: {error}",
+                            "ERROR"
+                        )
                 else:
                     unfinished.append(task)
 
             pending = unfinished
 
-        log("Waktu pengujian selesai. Menunggu request tersisa...")
+        log("Waktu pengujian berakhir.")
 
         for future in as_completed(pending):
             try:
                 results.append(future.result())
             except Exception as error:
-                log(f"Kesalahan worker: {error}", "ERROR")
+                log(
+                    f"Worker error: {error}",
+                    "ERROR"
+                )
 
     results.sort(key=lambda item: item["id"])
 
@@ -313,17 +506,12 @@ def run_simulation(url, duration, rps):
     log("Pengujian selesai.", "SUCCESS")
 
 
-# ==================================================
-# PROGRAM UTAMA
-# ==================================================
+# =====================================================
+# MULAI PENGUJIAN
+# =====================================================
 
-def main():
-    print("\n====================================")
-    print("     DDOS By Mr.J4CK")
-    print("====================================")
-    print("Create By: JACKXCODE404")
-    print("Rules: 5000 detik dan 10 request/detik.")
-    print("====================================\n")
+def start_test():
+    print("\n--- MULAI PENGUJIAN ---")
 
     url = input("Masukkan URL target: ").strip()
 
@@ -334,30 +522,83 @@ def main():
         return
 
     try:
-        duration = int(input("Durasi (1-5000 detik): "))
-        rps = int(input("Request per detik (1-20): "))
+        duration = int(
+            input("Durasi (1-30 detik): ")
+        )
+
+        rps = int(
+            input("Request per detik (1-5): ")
+        )
 
         if not 1 <= duration <= MAX_DURATION:
-            raise ValueError("Durasi harus 1 sampai 5000 detik.")
+            raise ValueError(
+                "Durasi harus 1 sampai 30 detik."
+            )
 
         if not 1 <= rps <= MAX_RPS:
-            raise ValueError("RPS harus 1 sampai 20.")
+            raise ValueError(
+                "RPS harus 1 sampai 5."
+            )
 
     except ValueError as error:
-        log(f"Input tidak valid: {error}", "ERROR")
+        log(str(error), "ERROR")
         return
 
     print("\nTarget:", url)
+    print("Pastikan target milikmu atau sudah memberi izin.")
+
     confirmation = input(
-        "Ketik Y jika kamu berwenang menguji target ini: "
+        "Ketik YES untuk melanjutkan: "
     ).strip()
 
-    if confirmation != "Y":
+    if confirmation != "YES":
         log("Pengujian dibatalkan.", "WARNING")
         return
 
     run_simulation(url, duration, rps)
 
 
+# =====================================================
+# MENU UTAMA
+# =====================================================
+
+def main():
+    load_authorized_hosts()
+
+    while True:
+        print("\n====================================")
+        print("      DDOS By Mr.J4CK")
+        print("====================================")
+        print("   Create By: JACKXCODE404")
+        print("1. Mulai pengujian")
+        print("2. Kelola DOMAIN/IP")
+        print("3. Keluar")
+        print("====================================")
+
+        choice = input("Pilih menu: ").strip()
+
+        if choice == "1":
+            start_test()
+
+        elif choice == "2":
+            manage_authorized_hosts()
+
+        elif choice == "3":
+            log("Program ditutup.")
+            break
+
+        else:
+            log("Pilihan tidak valid.", "WARNING")
+
+
+# =====================================================
+# PROGRAM UTAMA
+# =====================================================
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+
+    except KeyboardInterrupt:
+        print("\n")
+        log("Program dihentikan pengguna.", "WARNING")
