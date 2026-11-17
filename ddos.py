@@ -568,8 +568,8 @@ def main():
     while True:
         print("\n====================================")
         print("      DDOS By Mr.J4CK")
-        print("====================================")
         print("   Create By: JACKXCODE404")
+        print("====================================")
         print("1. Mulai pengujian")
         print("2. Kelola DOMAIN/IP")
         print("3. Keluar")
