@@ -124,9 +124,9 @@ def add_authorized_host():
     print("\nPastikan kamu pemilik target atau sudah")
     print("mendapatkan izin pengujian dari pemiliknya.")
 
-    confirmation = input("Ketik Y untuk menyimpan: ").strip()
+    confirmation = input("Ketik y untuk menyimpan: ").strip()
 
-    if confirmation != "Y":
+    if confirmation != "y":
         log("Penambahan dibatalkan.", "WARNING")
         return
 
@@ -548,10 +548,10 @@ def start_test():
     print("Pastikan target milikmu atau sudah memberi izin.")
 
     confirmation = input(
-        "Ketik YES untuk melanjutkan: "
+        "Ketik y untuk melanjutkan: "
     ).strip()
 
-    if confirmation != "YES":
+    if confirmation != "y":
         log("Pengujian dibatalkan.", "WARNING")
         return
 
