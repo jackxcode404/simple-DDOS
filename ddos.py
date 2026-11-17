@@ -523,21 +523,21 @@ def start_test():
 
     try:
         duration = int(
-            input("Durasi (1-30 detik): ")
+            input("Durasi (1-5000 detik): ")
         )
 
         rps = int(
-            input("Request per detik (1-5): ")
+            input("Request per detik (1-50): ")
         )
 
         if not 1 <= duration <= MAX_DURATION:
             raise ValueError(
-                "Durasi harus 1 sampai 30 detik."
+                "Durasi harus 1 sampai 5000 detik."
             )
 
         if not 1 <= rps <= MAX_RPS:
             raise ValueError(
-                "RPS harus 1 sampai 5."
+                "RPS harus 1 sampai 50."
             )
 
     except ValueError as error:
